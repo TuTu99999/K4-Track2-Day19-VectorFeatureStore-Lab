@@ -85,13 +85,14 @@ def percentile(values: list[float], p: float) -> float:
     return sorted(values)[min(int(n * p), n - 1)]
 
 
-def benchmark_mode(mode: str, reps: int = 2) -> dict[str, float]:
+def benchmark_mode(client: httpx.Client, mode: str, reps: int = 2) -> dict[str, float]:
     server_latencies: list[float] = []
     wall_latencies: list[float] = []
     for _ in range(reps):
         for q in golden:
             t0 = time.perf_counter()
-            r = httpx.get(f"{URL}/search", params={"q": q["query"], "mode": mode})
+            r = client.get(f"{URL}/search", params={"q": q["query"], "mode": mode})
+            r.raise_for_status()
             wall_latencies.append((time.perf_counter() - t0) * 1000)
             server_latencies.append(r.json()["latency_ms"])
     return {
@@ -104,11 +105,17 @@ def benchmark_mode(mode: str, reps: int = 2) -> dict[str, float]:
 
 print(f"  {'mode':10}  {'P50':>7}  {'P95':>7}  {'P99':>7}  {'P99(wall)':>9}")
 results = {}
-for mode in ("keyword", "semantic", "hybrid"):
-    res = benchmark_mode(mode)
-    results[mode] = res
-    print(f"  {mode:10}  {res['p50_server']:>5.1f}ms  {res['p95_server']:>5.1f}ms  "
-          f"{res['p99_server']:>5.1f}ms  {res['p99_wall']:>7.1f}ms")
+with httpx.Client(timeout=30.0) as client:
+    # Warm the model and HTTP connection before collecting latency samples.
+    for q in golden[:10]:
+        warm = client.get(f"{URL}/search", params={"q": q["query"], "mode": "hybrid"})
+        warm.raise_for_status()
+
+    for mode in ("keyword", "semantic", "hybrid"):
+        res = benchmark_mode(client, mode)
+        results[mode] = res
+        print(f"  {mode:10}  {res['p50_server']:>5.1f}ms  {res['p95_server']:>5.1f}ms  "
+              f"{res['p99_server']:>5.1f}ms  {res['p99_wall']:>7.1f}ms")
 
 # %% [markdown]
 # ## 4. Rubric assertion — hybrid P99 server-side < 50ms
